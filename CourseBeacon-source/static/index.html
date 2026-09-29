@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CourseBeacon</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body>
+  <header><h1>CourseBeacon</h1></header>
+  <main>
+    <div id="notice" role="status" aria-live="polite">正在连接本地服务…</div>
+    <section aria-label="未完成作业" class="task-list"><div class="bottomList"><ul id="items"></ul></div></section>
+    <p id="empty" hidden>暂无未完成作业</p>
+    <footer>
+      <div class="toolbar"><span id="summary"></span><button id="refresh">刷新作业</button><button id="settings-toggle" aria-expanded="false">设置</button></div>
+      <p id="sync-note">剩余时间直接读取超星原文，每轮同步结束后 60 秒再次检查。</p>
+      <details id="errors" hidden><summary>部分课程读取失败</summary><ul></ul></details>
+      <section id="settings" hidden aria-label="设置">
+        <label>下次启动端口 <input id="port" type="number" min="1024" max="65535" value="17890"></label>
+        <button id="save">保存</button><button id="stop">退出 CourseBeacon</button>
+        <p id="settings-message"></p>
+      </section>
+    </footer>
+  </main>
+</body>
+</html>

@@ -41,15 +41,15 @@ async function poll(){
     $('empty').hidden=!(s.status==='ready'&&!s.items.length);
     $('summary').textContent=(s.updatedAt?'更新于 '+new Date(s.updatedAt).toLocaleTimeString('zh-CN',{hour12:false})+' · ':'')+
       s.items.length+' 项未完成 · 排除 '+s.ended+' 门已结束课程'+(s.items.some(i=>i.stale)?' · 含待核验缓存':'');
-    $('refresh').disabled=s.running;$('refresh').textContent=s.running?'同步中 '+s.completed+'/'+s.total:'刷新作业';
-    $('sync-note').textContent='剩余时间直接读取超星原文，每轮同步结束后 '+s.interval+' 秒再次检查。';
+    $('refresh').disabled=s.running;$('refresh').textContent=s.running?(s.total?'检查中 '+s.completed+'/'+s.total:'正在连接…'):'检查作业';
+    $('browser-setup').hidden=!s.needsBrowserSetup;
     $('errors').hidden=!s.errors.length;
     $('errors').querySelector('ul').replaceChildren(...s.errors.map(e=>el('li','',e.course+'：'+e.message)));
     if(!initialized){$('port').value=s.nextPort;initialized=true;}
   }catch(e){$('notice').className='error';$('notice').textContent='无法连接 CourseBeacon，请重新打开程序。';}
   if(!stopped)setTimeout(poll,1500);
 }
-$('refresh').onclick=async()=>{try{await action('/api/refresh');$('notice').textContent='已安排刷新…';}catch(e){$('notice').textContent=e.message;}};
+$('refresh').onclick=async()=>{try{$('refresh').disabled=true;await action('/api/refresh');$('notice').className='';$('notice').textContent='已安排检查…';}catch(e){$('notice').textContent=e.message;$('refresh').disabled=false;}};
 $('settings-toggle').onclick=()=>{$('settings').hidden=!$('settings').hidden;$('settings-toggle').setAttribute('aria-expanded',String(!$('settings').hidden));};
 $('save').onclick=async()=>{try{await action('/api/settings',{port:Number($('port').value)});$('settings-message').textContent='已保存，下次启动生效。';}catch(e){$('settings-message').textContent=e.message;}};
 $('stop').onclick=async()=>{try{await action('/api/stop');stopped=true;$('notice').className='';$('notice').textContent='CourseBeacon 已退出，可以关闭此页。';$('refresh').disabled=true;}catch(e){$('settings-message').textContent=e.message;}};

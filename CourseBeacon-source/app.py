@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import secrets
@@ -17,10 +18,58 @@ from urllib.parse import urlparse
 import webbrowser
 from contextlib import closing
 
-from bridge import Bridge, ROOT
+from bridge import Bridge, ROOT, open_chrome
 
 HOME = 'https://i.chaoxing.com/base?ws=3&vflag=true&fid=&backUrl='
 DEFAULT_PORT = 17890
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def failure_kind(exc):
+    text = str(exc).lower()
+    if any(s in text for s in ('auth_required', '登录已失效', '登录失效', 'passport2')):
+        return 'login'
+    if any(s in text for s in ('browser_gone', 'not open', 'has been closed', 'browser closed',
+                              'econnrefused', 'socket closed', 'connection closed')):
+        return 'browser'
+    if any(s in text for s in ('verification_required', '人脸', '验证码', '访问验证')):
+        return 'verification'
+    return 'transient'
+
+
+class InstanceLock:
+    def __init__(self, directory):
+        self.path = Path(directory)/'instance.lock'
+        self.handle = None
+
+    def acquire(self):
+        import msvcrt
+        self.handle = self.path.open('a+b')
+        self.handle.seek(0, 2)
+        if not self.handle.tell():
+            self.handle.write(b'0'); self.handle.flush()
+        self.handle.seek(0)
+        try:
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            self.handle.close(); self.handle = None
+            return False
+
+    def close(self):
+        if self.handle:
+            import msvcrt
+            self.handle.seek(0)
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            self.handle.close(); self.handle = None
 
 
 def allowed_url(url):
@@ -58,7 +107,7 @@ class Application:
         self.lock = threading.RLock()
         self.wake = threading.Event()
         self.stop = threading.Event()
-        self.full_requested = True
+        self.wake.set()  # Exactly one initial scan; later scans require a button click.
         self.bridge = Bridge(directory, args.session)
         self.token = secrets.token_urlsafe(32)
         self.config_file = directory / 'config.json'
@@ -68,7 +117,7 @@ class Application:
         self.state = dict(status='starting', message='正在启动 Chrome…', courses=old.get('courses', []),
             ended=old.get('ended', 0), items=old.get('items', []), errors=[], total=0, completed=0,
             updatedAt=old.get('updatedAt'), stale=True, running=False, port=args.port,
-            nextPort=args.port, interval=args.interval)
+            nextPort=args.port, mode='manual', needsBrowserSetup=False)
         self.list_urls = {}
 
     def set(self, **values):
@@ -86,48 +135,65 @@ class Application:
 
     def refresh(self):
         with self.lock:
-            self.full_requested = True
-        self.wake.set()
+            if self.state['running'] or self.wake.is_set():
+                return False
+            self.wake.set()
+            return True
 
     def run(self, dashboard):
         try:
-            if not self.args.attach:
-                self.bridge.open(HOME, dashboard, self.args.profile or self.directory / 'chrome-profile')
-            else:
-                self.bridge.code('async page => { const p=await page.context().newPage(); await p.goto(' + json.dumps(dashboard) + '); return true; }')
-        except Exception as exc:
-            logging.exception('Browser launch failed')
-            self.set(status='error', message='Chrome 启动失败：' + str(exc), running=False)
-            webbrowser.open(dashboard)
-            return
-        while not self.stop.is_set():
-            self.wake.clear()
-            with self.lock:
-                full = self.full_requested
-                self.full_requested = False
-            try:
-                self.scan(full)
-            except Exception as exc:
-                logging.exception('Scan failed')
-                self.set(status='error', message=str(exc), stale=True, running=False)
-            # A manual refresh requested during a scan is never lost.
-            if not self.stop.is_set():
-                self.wake.wait(self.args.interval)
-        if not self.args.attach:
-            try:
-                self.bridge.close()
-            except Exception:
-                logging.exception('Browser close failed')
+            while True:
+                self.wake.wait()  # No timer and no automatic retry after failure.
+                if self.stop.is_set():
+                    break
+                with self.lock:
+                    self.wake.clear()
+                    self.state.update(running=True, completed=0, total=0)
+                try:
+                    if not self.bridge.connected:
+                        self.set(status='connecting', message='正在连接本机 Chrome，请允许 Chrome 中的连接提示…')
+                        try:
+                            self.bridge.connect(HOME)
+                            self.set(needsBrowserSetup=False)
+                        except Exception:
+                            try: self.bridge.close()
+                            except Exception: pass
+                            self.bridge.connected = False
+                            self.set(needsBrowserSetup=True)
+                            raise RuntimeError('未连接到本机 Chrome。请打开 chrome://inspect/#remote-debugging，允许远程调试和连接提示，然后点击“检查作业”重试。')
+                    self.scan(True)
+                except Exception as exc:
+                    logging.exception('Scan interrupted')
+                    kind = failure_kind(exc)
+                    if kind == 'browser':
+                        try: self.bridge.close()
+                        except Exception: pass
+                        self.bridge.connected = False
+                    self.set(status='login' if kind == 'login' else 'error', message=str(exc),
+                             stale=True, running=False)
+                finally:
+                    self.set(running=False)
+        finally:
+            try: self.bridge.close()
+            except Exception: logging.exception('Browser detach failed')
 
     def scan(self, full):
-        self.set(status='scanning', running=True, message='正在读取课程列表…', errors=[])
+        self.set(status='scanning', running=True, message='正在读取课程列表…', errors=[], completed=0)
         if full or not self.state['courses']:
             self.bridge.goto(HOME)
+            deadline = time.monotonic() + 45
+            login_deadline = time.monotonic() + 600
             while not self.stop.is_set():
                 found = self.bridge.script('courses.js')
                 if found.get('ready'):
                     break
-                self.set(status='login', message='请在 CourseBeacon 打开的 Chrome 中登录超星；登录后自动继续。')
+                if found.get('login'):
+                    self.set(status='login', message='请在本机 Chrome 的超星页登录；本次检查将在登录后继续。')
+                    deadline = time.monotonic() + 45
+                    if time.monotonic() > login_deadline:
+                        raise RuntimeError('AUTH_REQUIRED: 登录等待超时，请登录后点击检查作业。')
+                elif time.monotonic() > deadline:
+                    raise RuntimeError('课程列表加载超时，请检查网络或页面提示后手动重试。')
                 self.stop.wait(2)
             if self.stop.is_set():
                 return
@@ -144,20 +210,26 @@ class Application:
         items = self.snapshot()['items']
         active_ids = {c['id'] for c in courses}
         items = [i for i in items if i.get('courseId') in active_ids]
+        for item in items:
+            item['stale'] = True
+        self.set(items=copy.deepcopy(items), stale=bool(items))
         errors = []
+        consecutive_failures = 0
         for index, course in enumerate(courses):
             if self.stop.is_set():
                 return
             self.set(message=f'正在同步 {index+1}/{len(courses)} · {course["name"]}')
             try:
                 payload = {'course': course, 'listUrl': self.list_urls.get(course['id'])}
-                try:
-                    result = self.bridge.script('assignments.js', payload, timeout=180)
-                except Exception:
-                    if not payload['listUrl']:
-                        raise
-                    # Signed URLs can expire. Re-enter through the course navigation.
-                    result = self.bridge.script('assignments.js', {'course':course}, timeout=180)
+                for attempt in range(2):
+                    try:
+                        result = self.bridge.script('assignments.js', payload, timeout=120)
+                        break
+                    except Exception as exc:
+                        if failure_kind(exc) != 'transient' or attempt:
+                            raise
+                        if self.stop.wait(1.5): return
+                        payload = {'course':course}  # One fresh navigation retry only.
                 self.list_urls[course['id']] = result['listUrl']
                 fresh = []
                 for item in result['items']:
@@ -168,12 +240,24 @@ class Application:
                         courseId=course['id'], course=course['name'], stale=False)
                     fresh.append(item)
                 items = [i for i in items if i.get('courseId') != course['id']] + fresh
+                consecutive_failures = 0
             except Exception as exc:
-                logging.exception('Course failed: %s', course['name'])
+                logging.warning('Course failed: %s: %s', course['name'], str(exc).split('Call log:')[0][:500])
+                kind = failure_kind(exc)
+                if kind in ('login', 'browser'):
+                    self.set(items=copy.deepcopy(items), errors=errors + [{'course':course['name'], 'message':str(exc)}],
+                             completed=index, stale=True)
+                    self.persist()
+                    raise RuntimeError(str(exc) + '；本轮已停止，剩余课程尚未检查。') from exc
                 errors.append({'course':course['name'], 'message':str(exc)})
+                consecutive_failures = consecutive_failures+1 if kind == 'transient' else 0
                 for item in items:
                     if item.get('courseId') == course['id']:
                         item['stale'] = True
+                if consecutive_failures >= 3:
+                    self.set(items=copy.deepcopy(items), errors=errors, completed=index+1, stale=True)
+                    self.persist()
+                    raise RuntimeError('连续 3 门课程读取失败，本轮已停止；请检查网络后手动重试，剩余课程尚未检查。')
             with self.lock:
                 self.state.update(items=copy.deepcopy(items), errors=errors[:], completed=index+1)
         partial = bool(errors)
@@ -217,7 +301,7 @@ def make_handler(app):
             if path == '/api/session':
                 return self.send(200, {'token':app.token})
             if path == '/api/ping':
-                return self.send(200, {'app':'CourseBeacon', 'version':'1.0.0'})
+                return self.send(200, {'app':'CourseBeacon', 'version':'2.0.0'})
             allowed = {'/':('index.html','text/html; charset=utf-8'),
                 '/app.js':('app.js','text/javascript; charset=utf-8'),
                 '/style.css':('style.css','text/css; charset=utf-8'),
@@ -243,8 +327,8 @@ def make_handler(app):
             except (ValueError, json.JSONDecodeError):
                 return self.send(400, {'error':'请求格式错误'})
             if self.path == '/api/refresh':
-                app.refresh()
-                return self.send(202, {'ok':True})
+                accepted = app.refresh()
+                return self.send(202 if accepted else 200, {'ok':True, 'queued':accepted})
             if self.path == '/api/settings':
                 port = body.get('port')
                 if type(port) is not int or not 1024 <= port <= 65535:
@@ -265,20 +349,11 @@ def make_handler(app):
 def main():
     parser = argparse.ArgumentParser(description='CourseBeacon 本地未完成作业汇总')
     parser.add_argument('-p','--port',type=int,help='本地端口，默认 17890')
-    parser.add_argument('--data-dir',type=Path,help='数据及独立 Chrome 配置目录')
-    parser.add_argument('--profile',type=Path,help=argparse.SUPPRESS)
-    parser.add_argument('--session',default='coursebeacon',help=argparse.SUPPRESS)
-    parser.add_argument('--attach',action='store_true',help=argparse.SUPPRESS)
-    parser.add_argument('--interval',type=int,default=60,help='两次同步之间的间隔秒数，至少 30')
+    parser.add_argument('--data-dir',type=Path,help='缓存、配置和日志目录')
+    parser.add_argument('--session',default='coursebeacon-'+secrets.token_hex(6),help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.profile:
-        args.profile = args.profile.resolve()
-    if args.interval < 30:
-        parser.error('同步间隔不能小于 30 秒')
     directory = (args.data_dir or Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'CourseBeacon').resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=directory/'coursebeacon.log', level=logging.INFO,
-        format='%(asctime)s %(levelname)s %(message)s', encoding='utf-8')
     if args.port is None:
         try:
             args.port = json.loads((directory/'config.json').read_text(encoding='utf-8'))['port']
@@ -286,15 +361,29 @@ def main():
             args.port = DEFAULT_PORT
     if type(args.port) is not int or not 1024 <= args.port <= 65535:
         parser.error('端口必须为 1024–65535')
+    instance = InstanceLock(directory)
+    if not instance.acquire():
+        try:
+            existing = int((directory/'running-port.txt').read_text())
+        except (OSError, ValueError):
+            existing = args.port
+        open_chrome(f'http://127.0.0.1:{existing}')
+        return 0
+    (directory/'running-port.txt').write_text(str(args.port), encoding='utf-8')
+    logging.basicConfig(handlers=[RotatingFileHandler(directory/'coursebeacon-v2.log',
+        maxBytes=1024*1024, backupCount=3, encoding='utf-8')], level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s')
     app = Application(directory, args)
     try:
-        server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(app))
+        server = LocalHTTPServer(('127.0.0.1', args.port), make_handler(app))
     except OSError:
+        instance.close()
         import ctypes
         ctypes.windll.user32.MessageBoxW(None,
             f'端口 {args.port} 已被占用。\n请关闭已有 CourseBeacon，或使用 --port 其他端口。', 'CourseBeacon', 0x10)
         return 1
     worker = threading.Thread(target=app.run, args=(f'http://127.0.0.1:{args.port}',), daemon=True)
+    open_chrome(f'http://127.0.0.1:{args.port}')
     worker.start()
     try:
         server.serve_forever(poll_interval=.25)
@@ -304,6 +393,7 @@ def main():
     finally:
         server.server_close()
         worker.join(timeout=195)
+        instance.close()
     return 0
 
 

@@ -5,18 +5,20 @@ import tempfile
 import threading
 import unittest
 import logging
+from unittest.mock import Mock
+import time
 from http.server import ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from app import Application, allowed_url, make_handler
+from app import Application, allowed_url, make_handler, failure_kind, InstanceLock, LocalHTTPServer
 
 
 class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app = Application(Path(self.tmp.name), argparse.Namespace(
-            port=17890,interval=60,session='test',attach=True,profile=None))
+            port=17890,session='test'))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -36,7 +38,7 @@ class Tests(unittest.TestCase):
                 if payload['course']['id']=='b': raise RuntimeError('离线')
                 return {'items':[], 'listUrl':'https://mooc1.chaoxing.com/list'}
         self.app.bridge=Fake()
-        with self.assertLogs(level=logging.ERROR):
+        with self.assertLogs(level=logging.WARNING):
             self.app.scan(False)
         s=self.app.snapshot()
         self.assertEqual(s['status'],'partial')
@@ -59,6 +61,94 @@ class Tests(unittest.TestCase):
         self.assertEqual(s['status'],'ready');self.assertFalse(s['stale'])
         self.assertEqual([i['title'] for i in s['items']],['new'])
         self.assertEqual(s['ended'],1)
+
+    def test_manual_schedule_and_duplicate_click(self):
+        self.app.bridge=Mock(connected=True)
+        completed=threading.Event()
+        calls=[]
+        def scan(full):
+            calls.append(full)
+            self.assertFalse(self.app.refresh())  # A busy click cannot queue another scan.
+            completed.set()
+        self.app.scan=scan
+        worker=threading.Thread(target=self.app.run,args=('http://127.0.0.1',))
+        worker.start()
+        try:
+            self.assertTrue(completed.wait(2))
+            time.sleep(.15)
+            self.assertEqual(len(calls),1)
+            completed.clear()
+            self.assertTrue(self.app.refresh())
+            self.assertTrue(completed.wait(2))
+            time.sleep(.15)
+            self.assertEqual(len(calls),2)
+        finally:
+            self.app.stop.set();self.app.wake.set();worker.join(2)
+        self.assertFalse(worker.is_alive())
+
+    def test_login_failure_stops_round_without_retrying_other_courses(self):
+        self.app.set(courses=[dict(id='a',name='A'),dict(id='b',name='B')])
+        self.app.bridge=Mock()
+        self.app.bridge.script.side_effect=RuntimeError('AUTH_REQUIRED: 登录已失效')
+        with self.assertLogs(level=logging.WARNING):
+            with self.assertRaisesRegex(RuntimeError,'剩余课程尚未检查'):
+                self.app.scan(False)
+        self.assertEqual(self.app.bridge.script.call_count,1)
+        self.assertEqual(self.app.snapshot()['completed'],0)
+
+    def test_transient_failure_retries_once(self):
+        self.app.set(courses=[dict(id='a',name='A')])
+        self.app.bridge=Mock()
+        self.app.bridge.script.side_effect=[RuntimeError('navigation timeout'), {'items':[],'listUrl':'https://mooc1.chaoxing.com/list'}]
+        self.app.scan(False)
+        self.assertEqual(self.app.bridge.script.call_count,2)
+        self.assertEqual(self.app.snapshot()['status'],'ready')
+
+    def test_permanent_verification_is_not_retried(self):
+        self.app.set(courses=[dict(id='a',name='A')])
+        self.app.bridge=Mock()
+        self.app.bridge.script.side_effect=RuntimeError('VERIFICATION_REQUIRED: 人脸信息采集')
+        with self.assertLogs(level=logging.WARNING):self.app.scan(False)
+        self.assertEqual(self.app.bridge.script.call_count,1)
+        self.assertEqual(self.app.snapshot()['status'],'partial')
+
+    def test_windows_single_instance(self):
+        import os
+        if os.name!='nt':self.skipTest('Windows only')
+        first=InstanceLock(self.tmp.name);second=InstanceLock(self.tmp.name)
+        try:
+            self.assertTrue(first.acquire());self.assertFalse(second.acquire())
+            first.close();self.assertTrue(second.acquire())
+        finally:first.close();second.close()
+
+    def test_local_server_rejects_second_bind(self):
+        server=LocalHTTPServer(('127.0.0.1',0),make_handler(self.app))
+        try:
+            with self.assertRaises(OSError):
+                duplicate=ThreadingHTTPServer(('127.0.0.1',server.server_port),make_handler(self.app))
+                duplicate.server_close()
+        finally:server.server_close()
+
+    def test_bridge_detaches_instead_of_closing_user_browser(self):
+        bridge=self.app.bridge
+        bridge.command=Mock();bridge.code=Mock();bridge.connected=True;bridge.scanner_id='owned'
+        bridge.close()
+        bridge.command.assert_called_once_with('detach',timeout=15)
+        self.assertFalse(bridge.connected)
+
+    def test_connection_failure_allows_manual_retry(self):
+        self.app.bridge=Mock(connected=False)
+        self.app.bridge.connect.side_effect=RuntimeError('permission denied')
+        worker=threading.Thread(target=self.app.run,args=('http://127.0.0.1',))
+        with self.assertLogs(level=logging.ERROR):
+            worker.start()
+            for _ in range(100):
+                if self.app.snapshot()['status']=='error':break
+                time.sleep(.01)
+            self.app.stop.set();self.app.wake.set();worker.join(2)
+        self.assertFalse(self.app.snapshot()['running'])
+        self.assertTrue(self.app.snapshot()['needsBrowserSetup'])
+        self.assertEqual(self.app.bridge.connect.call_count,1)
 
     def test_http_rejects_unauthorized_mutation_and_host(self):
         server=ThreadingHTTPServer(('127.0.0.1',0), make_handler(self.app))

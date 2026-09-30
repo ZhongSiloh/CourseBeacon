@@ -1,174 +1,138 @@
 # CourseBeacon
 
-> 基于 Python 与 Playwright CLI 的超星未完成作业汇总工具。
+> 使用 Python 与 Playwright CLI 汇总超星未完成作业的 Windows 本地工具。
 
-CourseBeacon 在本机启动网页服务，通过独立的 Google Chrome 会话读取超星课程中的未完成作业，并集中显示作业名称、提交状态、剩余时间和直达链接。程序可打包为 Windows 单文件 `.exe`，供未安装开发环境的用户使用。
+CourseBeacon v2 在本机 Chrome 中打开 `http://127.0.0.1:17890`，连接用户现有 Chrome 会话，读取课程中的未完成作业，并显示原网页风格的作业行及直达链接。
 
 ## 目录
 
 - [功能特性](#功能特性)
 - [技术栈及其作用](#技术栈及其作用)
-- [系统架构](#系统架构)
 - [环境要求](#环境要求)
 - [快速开始](#快速开始)
-- [源码运行](#源码运行)
+- [刷新与失败处理](#刷新与失败处理)
 - [配置说明](#配置说明)
 - [项目结构](#项目结构)
 - [实现步骤](#实现步骤)
+- [源码运行与打包](#源码运行与打包)
 - [本地接口](#本地接口)
 - [数据存储](#数据存储)
-- [打包发布](#打包发布)
-- [测试与验证](#测试与验证)
-- [已知限制](#已知限制)
-- [常见问题](#常见问题)
+- [测试](#测试)
+- [已知限制与常见问题](#已知限制与常见问题)
 - [许可证与资源说明](#许可证与资源说明)
 
 ## 功能特性
 
-- **本地网页展示**：默认访问地址为 `http://127.0.0.1:17890`，支持自定义端口。
-- **持久化浏览器会话**：使用 `--persistent` 和固定的 `--profile` 目录，复用独立 Chrome 中的登录状态。
-- **等待手动登录**：遇到登录页时等待用户操作，课程列表出现后自动继续。
-- **课程筛选**：排除卡片上明确标注“课程已结束”的课程。
-- **未完成作业提取**：逐门进入“作业”，选择“未完成”，遍历作业分页并去重。
-- **原网页风格**：按参考页面还原作业行的图标、字号、状态颜色、间距和时间样式。
-- **直接打开作业**：使用页面中的真实作业链接，在新标签页打开。
-- **自动与手动同步**：定期检查已发现课程，手动刷新时重新发现课程。
-- **失败保留缓存**：单门课程读取失败时显示原因，保留该课程上次结果并标记待核验。
-- **单文件发布**：内置 Python、Node.js 和 Playwright CLI 运行所需文件。
+- **启动检查一次**：首次启动触发一轮检查，此后只在点击按钮时检查，不进行定时扫描。
+- **标题下方按钮**：“检查作业”按钮位于 CourseBeacon 标题下方居中，扫描期间禁用重复触发。
+- **复用本机 Chrome**：通过 `playwright-cli attach --cdp=chrome` 连接日常 Chrome，复用其现有登录状态，不复制或替换用户资料目录。
+- **独立扫描标签**：仅操作程序新建的扫描标签，以 Chrome target ID 定位，避免导航用户原有标签页。
+- **未完成作业汇总**：排除明确标注“课程已结束”的课程，读取“作业 → 未完成”的所有受支持分页。
+- **直达链接与原样时间**：使用原网页链接和剩余时间文本，保留作业行的图标、字号和状态颜色。
+- **有限重试与缓存保留**：临时错误最多重试一次；登录或浏览器失效立即停止本轮，不逐门重复失败。
+- **安全退出**：退出仅关闭本程序的扫描标签并断开调试连接，不关闭用户 Chrome。
+- **重复启动保护**：同一数据目录限制一个新版实例；再次启动打开已有服务页面。
 
-程序只读取和展示作业列表，不填写答案或提交作业。
+程序不会填写或提交作业。
 
 ## 技术栈及其作用
 
-下表中的版本为本项目构建时使用的版本，不代表所有其他版本均已验证。
+以下为本项目使用的构建版本，并非声明其他版本均已验证。
 
-| 技术 / 模块 | 构建版本或形式 | 在项目中的作用 |
+| 技术 / 模块 | 版本或形式 | 作用 |
 | --- | --- | --- |
-| Python | 3.13.1，x64 | 程序入口、配置解析、后台扫描调度、缓存管理和本地服务 |
-| `http.server` | Python 标准库 | 使用 `ThreadingHTTPServer` 和 `BaseHTTPRequestHandler` 提供静态文件及 JSON 接口 |
-| `threading` | Python 标准库 | 将课程扫描与网页请求分开处理，通过锁和事件协调刷新、状态读取和退出 |
-| `subprocess` | Python 标准库 | 以参数列表调用内置 Node 和 CLI，读取输出并处理超时 |
-| Node.js | 24.15.0 | 运行官方 Playwright CLI 及其依赖 |
-| `@playwright/cli` | 0.1.13 | 启动 Chrome、管理会话、执行 Playwright 页面提取脚本 |
-| Google Chrome | 用户已安装的浏览器 | 提供真实登录界面、执行网页脚本、访问课程和打开作业 |
-| SQLite / `sqlite3` | Python 内置接口 | 保存最近一次汇总快照，无需额外数据库服务 |
-| HTML5 / CSS3 | 原生静态页面 | 构建 CourseBeacon 页面和作业行布局，适配窄屏 |
-| JavaScript / Fetch API | 原生浏览器接口 | 轮询本地状态、渲染作业、保存设置、触发刷新和退出 |
-| PyInstaller | 6.16.0 | 将 Python 程序、静态资源、提取脚本和 Node/CLI 运行时打包为 `.exe` |
-| `unittest` | Python 标准库 | 验证缓存更新、失败保留、URL 校验和本地接口访问控制 |
+| Python | 3.13.1 x64 | 启动入口、配置、扫描任务调度、结果整理 |
+| `http.server` | 标准库 | 通过 `ThreadingHTTPServer` 提供本地静态页面和 JSON API |
+| `threading` | 标准库 | 后台扫描线程、手动触发事件和状态锁 |
+| `subprocess` | 标准库 | 按参数列表调用 Node 与 Playwright CLI |
+| Node.js | 24.15.0 | 执行 CLI 及其依赖 |
+| `@playwright/cli` | 0.1.13 | 连接现有 Chrome、执行页面和 iframe 提取脚本 |
+| Chrome / CDP | 本机 Chrome；开发机器为 154 | 提供已登录的真实浏览器会话及标签页标识 |
+| SQLite / `sqlite3` | Python 标准库 | 持久化最近一次汇总快照 |
+| HTML / CSS / JavaScript | 原生前端 | 展示列表、按钮与设置，通过 Fetch API 读取本地状态 |
+| `msvcrt` | Windows 标准库接口 | 单实例文件锁，防止多个新版实例争用同一数据目录 |
+| `RotatingFileHandler` | Python 标准库 | 限制日志大小，避免反复失败产生无限增长日志 |
+| PyInstaller | 6.16.0 | 打包 Python、Node、CLI、提取脚本和页面资源 |
+| `unittest` | 标准库 | 回归验证刷新调度、失败处理、缓存和本地接口 |
 
-当前代码采用 Python 标准库服务和原生前端，不依赖参考指南中的 FastAPI、Vue、Element Plus 或 Axios，也不要求安装 Python 版 Playwright。
-
-## 系统架构
-
-```text
-用户
- └─ Chrome 中的 CourseBeacon 页面（127.0.0.1）
-     └─ 本地 JSON 接口
-         └─ Python 应用
-             ├─ HTTP 服务：静态页面、状态查询、设置和退出
-             ├─ SQLite：最近一次扫描快照
-             └─ 后台扫描线程
-                 └─ bridge.py：子进程调用
-                     └─ Node.js → playwright-cli
-                         └─ 独立 Chrome 会话
-                             └─ 超星课程 → 作业 → 未完成
-```
-
-浏览器自动化命令由 `bridge.py` 串行执行。前端约每 1.5 秒读取一次**本地状态**；这不等于每 1.5 秒访问超星。超星课程扫描按后台同步周期执行。
+应用没有使用 FastAPI、Vue、Element Plus、Axios 或 Python 版 Playwright。当前技术栈以实际源码为准。
 
 ## 环境要求
 
-### 使用打包程序
+### 运行 exe
 
-- Windows 10/11 x64；本次构建及实测环境为 Windows 11 x64。
-- 已安装 Google Chrome。
-- 能正常访问超星，并拥有可查看课程的账号。
-- 本地使用的端口未被其他程序占用。
+- Windows 10/11 x64；构建环境为 Windows 11 x64。
+- 安装支持 `chrome://inspect/#remote-debugging` 的 Google Chrome。
+- Chrome 中已允许远程调试，并在首次连接时允许连接请求。
+- 能正常访问超星，且本机 Chrome 中的账号可访问目标课程。
 
-不需要额外安装 Python、Node.js、npm 或 Playwright CLI。Chrome 不包含在安装包中。
+exe 内置 Python、Node 和 Playwright CLI；不包含 Chrome。
 
-### 源码开发与构建
+### 开发环境
 
-- Python 3.13 x64。
-- Node.js 与 npm；本项目使用 Node.js 24.15.0 构建。
-- Google Chrome。
-- `@playwright/cli@0.1.13`。
-- `requirements-build.txt` 中列出的 PyInstaller。
+Python 3.13 x64、Node.js、npm、Google Chrome，以及 `requirements-build.txt` 中的构建依赖。
 
 ## 快速开始
 
-1. 双击发布的 `CourseBeacon-persistent.exe`。自行构建时，默认文件名为 `CourseBeacon.exe`。
-2. 程序启动本地服务，并打开独立 Chrome 中的超星页和 CourseBeacon 页。
-3. 首次使用时，在该 Chrome 窗口的超星登录页完成登录。
-4. 等待课程扫描，汇总页面会逐步显示未完成作业。
-5. 点击任意作业行，在新标签页进入对应作业。鼠标悬停可查看课程名称。
-6. 使用“刷新作业”重新检查课程；使用“设置”修改下次启动端口。
-7. 通过“设置 → 退出 CourseBeacon”结束程序及其创建的独立 Chrome 会话。
+1. 先退出旧版 CourseBeacon，避免旧版继续按 60 秒间隔扫描或占用端口。
+2. 在日常使用的 Chrome 中打开 `chrome://inspect/#remote-debugging`，允许对此浏览器实例进行远程调试。
+3. 双击新版 `CourseBeacon.exe`。程序使用普通 Chrome 启动方式打开本地页面，不指定独立 `--user-data-dir`。
+4. 如 Chrome 显示连接确认，请允许。程序新建扫描标签并进行一次检查。
+5. 如果超星尚未登录，在扫描标签中登录；本次启动检查会等待登录后继续。
+6. 后续点击标题下方居中的“检查作业”获取新结果。扫描完成后不会自动再次读取超星。
+7. 点击作业行可在新标签中打开作业；悬停可查看课程名称。
+8. 通过“设置 → 退出 CourseBeacon”退出。用户 Chrome 和原有标签页保持打开。
 
-扫描期间请保留扫描标签页，避免在该标签页手动跳转。可以正常使用 CourseBeacon 页面及其打开的作业标签页。仅关闭网页标签不会结束后台服务。
+如果连接未成功，页面会显示调试设置说明。完成设置后点击“检查作业”即可重试，无需反复重启程序。
 
-## 源码运行
+### 与旧版持久化模式的区别
 
-以下命令在解压后的源码根目录执行，使用 PowerShell。
+旧版 `CourseBeacon-persistent.exe` 使用 `open --persistent --profile=...`，持久化的是 CourseBeacon 的独立浏览器资料。
 
-### 1. 创建 Python 虚拟环境
+v2 改为 `attach --cdp=chrome`，直接连接用户现有 Chrome。它不导入旧版 Cookie、不复制日常 Chrome 资料，也不会修改用户的书签或浏览器设置。用户需自行允许 Chrome 的调试连接。调试开关并不意味着登录永久有效，超星会话过期时仍需登录。
 
-```powershell
-python -m venv .venv
-```
+## 刷新与失败处理
 
-### 2. 安装构建依赖及浏览器自动化工具
+### 触发规则
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-npm install -g @playwright/cli@0.1.13
-```
+- 启动时自动检查一次。
+- 后续只能由“检查作业”按钮触发。
+- 扫描期间的重复触发不排队，不额外生成一轮任务。
+- 失败后不按定时器重试，保留错误提示供用户处理后手动重试。
+- 前端约每 1.5 秒读取一次本地状态，这只访问 `127.0.0.1`，不会触发超星扫描。
 
-Python 应用本身使用标准库；PyInstaller 主要用于生成可执行文件。
+### 错误处理规则
 
-### 3. 准备 Node 和 CLI 运行时
+| 情况 | 处理方式 |
+| --- | --- |
+| 临时导航或列表读取失败 | 从课程入口重新读取一次，仍失败则记录课程错误 |
+| 超星登录失效 | 立即停止本轮，提示登录，未检查课程不冒充成功 |
+| 浏览器连接或扫描标签已关闭 | 停止本轮，下一次手动检查重新连接 |
+| 人脸采集或访问验证 | 不重复尝试绕过验证，报告该课程的要求 |
+| 连续 3 门课程发生一般读取错误 | 提前停止本轮，提示检查网络和剩余课程未检查 |
+| 单门课程读取失败且存在旧数据 | 保留旧条目并标记待核验 |
+| 已成功读取且确认没有未完成作业 | 移除该课程的旧条目 |
 
-```powershell
-.\.venv\Scripts\python.exe build.py --prepare
-```
-
-此命令将本机已安装的 Node、Playwright CLI 及其依赖复制到 `build-work/runtime/`。如果本地没有 Node 许可证副本，构建脚本会从 Node 官方仓库获取对应版本许可证。
-
-### 4. 指定运行时并启动
-
-```powershell
-$env:COURSEBEACON_NODE = "$PWD\build-work\runtime\node.exe"
-$env:COURSEBEACON_CLI = "$PWD\build-work\runtime\cli\playwright-cli.js"
-
-.\.venv\Scripts\python.exe app.py --port 17890
-```
-
-随后在程序打开的 Chrome 中登录超星。重新打开 PowerShell 后，源码运行所需的两个环境变量需要重新设置。
+剩余时间按**最近一次检查时**超星提供的原文显示。程序不按秒倒计时；需要获取最新时间时，点击“检查作业”。
 
 ## 配置说明
 
-### 命令行参数
-
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-p` / `--port` | 配置文件中的端口，否则为 `17890` | 本地监听端口，范围 `1024–65535` |
-| `--interval` | `60` | 每轮同步结束后等待的秒数，最小值为 `30` |
-| `--data-dir` | `%LOCALAPPDATA%\CourseBeacon` | 数据库、日志、配置和默认浏览器资料目录的存放位置 |
+| `-p` / `--port` | 配置文件值，否则 `17890` | 本地端口，范围 `1024–65535` |
+| `--data-dir` | `%LOCALAPPDATA%\CourseBeacon` | 缓存、日志和应用配置目录；不是 Chrome 资料目录 |
 
 ```powershell
-.\CourseBeacon-persistent.exe --port 9000 --interval 120
+.\CourseBeacon.exe --port 9000
 ```
-
-源码运行时同样支持这些参数：
 
 ```powershell
-.\.venv\Scripts\python.exe app.py --port 9000 --data-dir ".\local-data"
+.\CourseBeacon.exe --data-dir ".\local-data"
 ```
 
-端口选择优先级为：**命令行参数 → `config.json` → 默认端口**。页面中保存的端口在下次启动时生效；命令行指定端口不会自动改写配置文件。
+v2 已移除 `--interval`、`--profile` 和旧的开发附加模式。内部 CLI 会话名为每次运行生成的唯一值，避免不同进程争用固定会话。
 
-`config.json` 示例：
+页面设置保存的端口在下次启动生效。端口优先级为“命令行 → 配置文件 → 默认值”。`config.json` 示例：
 
 ```json
 {
@@ -176,267 +140,186 @@ $env:COURSEBEACON_CLI = "$PWD\build-work\runtime\cli\playwright-cli.js"
 }
 ```
 
-源码还包含用于开发验证的 `--profile`、`--session` 和 `--attach` 参数，日常使用无需设置。
-
-### 会话持久化
-
-实际启动参数包含：
-
-```text
-playwright-cli -s=coursebeacon open <超星首页URL> --browser=chrome --headed --persistent --profile=<固定资料目录> --raw
-```
-
-Python 通过参数列表执行该命令，不将 URL 拼接为 Shell 命令。
-
-- `--persistent`：启用持久化浏览器会话。
-- `--profile`：指定稳定的资料目录，默认是 `%LOCALAPPDATA%\CourseBeacon\chrome-profile`。
-- `--headed`：显示浏览器窗口，便于用户完成登录。
-- `--browser=chrome`：使用系统 Google Chrome。
-
-持久化用于保留浏览器保存的登录状态，不代表登录永久有效。超星使会话过期或要求验证时，仍需本人重新操作。更换资料目录后不会自动继承原目录的登录状态。
-
 ## 项目结构
 
 ```text
 CourseBeacon/
-├─ app.py                    # HTTP 服务、扫描调度、配置与 SQLite 缓存
-├─ bridge.py                 # Python 调用 Node / Playwright CLI
-├─ build.py                  # 准备运行时与 PyInstaller 打包
-├─ requirements-build.txt    # 构建依赖
-├─ test_app.py               # 标准库 unittest 测试
-├─ README.md                 # 项目说明
+├─ app.py                    # 本地服务、手动调度、错误处理、单实例与缓存
+├─ bridge.py                 # Chrome 启动、CLI attach、扫描标签定位及 detach
+├─ build.py                  # 准备运行时和 exe 打包
+├─ requirements-build.txt    # PyInstaller 构建依赖
+├─ test_app.py               # 单元与回归测试
+├─ README.md
 ├─ scripts/
-│  ├─ courses.js             # 课程发现与已结束课程筛选
-│  └─ assignments.js         # 未完成作业筛选、分页及字段提取
+│  ├─ courses.js             # 从 iframe 中读取根课程列表
+│  └─ assignments.js         # 作业页识别、筛选、分页及访问状态检测
 ├─ static/
-│  ├─ index.html             # 页面结构
-│  ├─ style.css              # 页面与作业行样式
-│  ├─ app.js                 # 状态轮询和交互
-│  ├─ icons-act.png          # 作业图标资源
-│  └─ endTime.png            # 剩余时间图标
-├─ build-work/               # 构建时生成，包含运行时和打包中间文件
-└─ dist/                     # 构建时生成，存放 CourseBeacon.exe
+│  ├─ index.html             # 标题、居中检查按钮和列表
+│  ├─ style.css              # 页面及作业行样式
+│  ├─ app.js                 # 本地状态轮询和手动操作
+│  ├─ icons-act.png
+│  └─ endTime.png
+├─ build-work/               # 构建时生成
+└─ dist/                     # 构建时生成 CourseBeacon.exe
 ```
 
 ## 实现步骤
 
-### 1. 初始化配置和本地服务
+### 1. 初始化配置并限制重复启动
 
-`app.py` 解析命令行参数，确定数据目录和端口，创建日志及 SQLite 缓存表，读取上次快照。随后使用 `ThreadingHTTPServer` 绑定 `127.0.0.1`，提供页面和接口，并启动后台扫描线程。
+解析端口和数据目录，通过 `msvcrt.locking` 锁定 `instance.lock`。同一目录已有新版实例时，读取它记录的端口并打开现有页面。每次运行采用唯一 CLI 会话名。
 
-缓存中的条目在重新核验前被标记为 `stale`，以区分历史结果与本次成功读取的数据。
+### 2. 启动本地网页服务
 
-### 2. 启动持久化 Chrome
+使用 `ThreadingHTTPServer` 绑定 `127.0.0.1`，提供静态资源和 JSON API。后台线程与 HTTP 服务分离，页面可在扫描期间展示进度或请求退出。
 
-`Bridge.open()` 调用内置 Node 执行 `playwright-cli open`，传入 `--persistent` 和固定 `--profile`。Chrome 首先访问超星个人空间，再在同一浏览器上下文中新建 CourseBeacon 标签页。
+### 3. 使用日常 Chrome 打开网页并连接
 
-超星入口为：
-
-```text
-https://i.chaoxing.com/base?ws=3&vflag=true&fid=&backUrl=
-```
-
-### 3. 等待登录与课程列表加载
-
-扫描线程执行 `scripts/courses.js`，遍历页面及 iframe，寻找 `#courseList`。列表尚未出现时，页面提示用户完成登录，并每隔约 2 秒重新检查。用户退出程序时结束等待。
-
-### 4. 提取并筛选课程
-
-`courses.js` 从 `#courseList > li.course` 读取课程 ID、名称和入口链接，排除 `.not-open-tip` 中包含“课程已结束”的卡片。筛选依据是页面的明确标记，而不是课程的日期或名称。
-
-如果发现课程文件夹，当前版本会报告兼容限制，避免将根列表扫描结果当成完整结果。
-
-### 5. 进入作业页并选择未完成
-
-`assignments.js` 打开课程链接，点击“作业”入口，在页面或 iframe 中寻找 `.task-list #status`。如果当前筛选值不是 `1`，点击 `input[name="group-radio"][data="1"]`，并等待新文档中的 `#status` 确认变为 `1`。
-
-等待筛选值变化可以避免点击后过早读取旧列表。人脸采集或登录失效等阻塞会转为可见错误。
-
-### 6. 提取字段、遍历分页和去重
-
-脚本从 `.bottomList > ul > li` 提取下列信息：
-
-| 字段 | 用途 |
-| --- | --- |
-| `title` | 作业名称 |
-| `status` | 原网页的提交状态文字 |
-| `url` | 原网页提供的作业直达链接 |
-| `timeText` | 原网页剩余时间文本 |
-| `timeActive` | 是否使用进行中时间的显示样式 |
-| `timeIcon` / `iconClass` | 时间图标信息和作业图标类别 |
-| `label` | 原网页的附加标签 |
-| `observedAt` | 此条数据的读取时间，毫秒时间戳 |
-
-存在可用“下一页”按钮时继续读取，等待列表内容变化后再提取。单门课程使用 URL 去重，并设置最多 200 页的保护上限；超过上限时报告失败。
-
-Python 随后补充条目 ID、所属课程及缓存标记，并校验链接属于超星域名。
-
-### 7. 更新结果与保存快照
-
-每门课程成功读取后，用新结果替换该课程的旧条目。如果确认该课程没有未完成作业，其旧条目会被移除。
-
-单门课程失败时，保留该课程的旧条目并标记 `stale`，同时记录错误；其他课程继续扫描。一轮结束后将汇总状态保存为 SQLite 中的 JSON 快照。
-
-### 8. 渲染页面和作业链接
-
-前端 `static/app.js` 轮询 `/api/state`，使用 DOM API 和 `textContent` 构建作业行。作业标题、状态及时间分别放入对应样式区域，链接以新标签页打开。
-
-样式采用原网页的标题字号、灰色状态、橙色剩余时间和作业图标，去除参考截图中用于标注的红框。课程名称放在悬停提示中。
-
-### 9. 自动刷新与退出
-
-一轮同步结束后等待 `--interval` 指定的时间，再读取已发现课程。自动同步优先复用作业列表链接；链接读取失败时，重新从课程入口获取。手动刷新会重新发现课程并清空列表链接缓存。
-
-点击“退出 CourseBeacon”后，程序发出停止信号，关闭 HTTP 服务，并由后台线程结束本程序创建的 Chrome 会话。
-
-> **时间显示说明：** `timeText` 直接使用超星列表返回的原文，不在前端按秒倒计时，也不推算精确截止时刻。与刚刷新的超星页面之间可能存在扫描耗时及同步间隔造成的差异。前端频繁轮询本地状态不会自动刷新超星时间文本。
-
-## 本地接口
-
-接口仅供本机 CourseBeacon 页面使用。
-
-| 方法 | 路径 | 作用 |
-| --- | --- | --- |
-| `GET` | `/` | 返回 CourseBeacon 页面 |
-| `GET` | `/api/ping` | 返回应用名称和版本 |
-| `GET` | `/api/state` | 返回扫描状态、课程、作业、错误和进度 |
-| `GET` | `/api/session` | 返回当前进程的本地操作令牌 |
-| `POST` | `/api/refresh` | 请求重新发现课程并同步 |
-| `POST` | `/api/settings` | 接收 `{"port":9000}`，保存下次启动端口 |
-| `POST` | `/api/stop` | 请求退出程序 |
-
-POST 请求需要 `X-CourseBeacon-Token` 请求头。服务校验 `Host`；请求携带 `Origin` 时要求其匹配本地页面来源。静态页面采用同源内容策略，不加载第三方脚本。
-
-## 数据存储
-
-默认数据目录为 `%LOCALAPPDATA%\CourseBeacon`：
+通过本机 Chrome 可执行文件正常打开本地 URL，不添加资料目录参数。后台调用：
 
 ```text
-CourseBeacon/
-├─ chrome-profile/          # 独立 Chrome 资料及登录状态
-├─ coursebeacon.sqlite3     # 最近一次汇总快照
-├─ config.json              # 保存的端口配置
-└─ coursebeacon.log         # 扫描及异常日志
+playwright-cli -s=<本次唯一会话名> attach --cdp=chrome --raw
 ```
 
-CLI 还可能在工作目录生成诊断文件；正常执行完成后，Python 会删除本次生成的临时命令脚本。
+连接后通过 CLI 新建扫描标签，使用 CDP 的 `Target.getTargetInfo` 记录该标签的 target ID。后续脚本定位到该标签才执行，避免误操作当前选中的个人标签页。
 
-SQLite 使用单张缓存表：
+### 4. 等待登录并发现课程
 
-```sql
-CREATE TABLE IF NOT EXISTS cache (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
+导航到超星个人空间，遍历页面及 iframe，查找 `#courseList`。登录等待最多 10 分钟；非登录状态的列表加载等待约 45 秒，避免无限循环。
+
+课程提取使用 `#courseList > li.course`，排除 `.not-open-tip` 明确包含“课程已结束”的卡片。发现课程文件夹时报告当前兼容限制。
+
+### 5. 检查未完成作业
+
+逐门进入课程并等待“作业”入口。查找页面或 iframe 中的 `.task-list #status`，点击 `input[name="group-radio"][data="1"]` 后，等待筛选值确认变为 `1`。
+
+等待页面加载期间同时检查登录跳转、人脸采集及访问验证提示，避免在已知无法继续的页面等到完整超时。
+
+### 6. 分页提取并校验链接
+
+从 `.bottomList > ul > li` 读取作业名称、状态、直达 URL、时间原文、图标类别和附加标签。有下一页时，等待列表内容变化后继续读取，按 URL 去重，设置 200 页保护上限。
+
+Python 补充所属课程、条目 ID 和读取时间，校验链接属于超星域名。
+
+### 7. 更新缓存并展示
+
+成功课程按本次结果替换旧数据；失败课程保留已有条目并标记待核验。前端使用 DOM API 与 `textContent` 渲染标题、状态和时间，以真实 URL 创建链接。
+
+SQLite 保存最近一次 JSON 快照，不保存每轮完整历史。页面同时展示成功数量、错误和未核验数据状态。
+
+### 8. 等待手动触发
+
+扫描线程通过无超时时间的 `Event.wait()` 等待。只有启动事件、用户检查按钮或退出事件会唤醒线程。不存在每隔 60 秒自动发起扫描的逻辑。
+
+### 9. 退出时保留用户浏览器
+
+只关闭程序记录的扫描 target，然后执行 `playwright-cli detach`。不调用关闭整个浏览器的命令，不终止 Chrome 进程。
+
+## 源码运行与打包
+
+在源码根目录使用 PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+npm install -g @playwright/cli@0.1.13
+.\.venv\Scripts\python.exe build.py --prepare
 ```
 
-当前以 `snapshot` 为键保存一份 JSON 快照，不是逐次保留的历史作业数据库。运行时数据保存在用户数据目录，和 PyInstaller 的临时解压目录分开。
+设置源码运行时路径：
 
-运行后的资料目录包含登录状态及个人课程信息，不应打包发布。项目构建脚本只收集程序文件、静态资源、提取脚本和工具运行时。
+```powershell
+$env:COURSEBEACON_NODE = "$PWD\build-work\runtime\node.exe"
+$env:COURSEBEACON_CLI = "$PWD\build-work\runtime\cli\playwright-cli.js"
+.\.venv\Scripts\python.exe app.py --port 17890
+```
 
-## 打包发布
-
-### 标准构建
-
-在源码根目录执行：
+生成 exe：
 
 ```powershell
 .\.venv\Scripts\python.exe build.py
 ```
 
-输出文件：
+构建结果为 `dist/CourseBeacon.exe`。构建脚本复制已安装的 Node、CLI 及其依赖，加入 `static/` 和 `scripts/`，使用 PyInstaller 的 `--onefile --windowed` 生成程序。不复制用户浏览器资料。
 
-```text
-dist/CourseBeacon.exe
-```
+支持 `--node`、`--cli-root`、`--work-dir`、`--output-dir` 指定构建路径。本地无 Node 许可证副本时，会从官方仓库获取对应版本许可证。
 
-当前提供的持久化版本发布文件名为 `CourseBeacon-persistent.exe`；文件名不同不影响启动参数或数据目录。
+构建前退出待覆盖的 exe，或者指定新的输出目录。
 
-### 自定义构建路径
+## 本地接口
 
-以下为路径格式示例，需替换成本机实际安装位置：
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| GET | `/` | 本地页面 |
+| GET | `/api/ping` | 应用名称和版本 `2.0.0` |
+| GET | `/api/state` | 课程、作业、扫描进度、错误及连接提示 |
+| GET | `/api/session` | 本地操作令牌 |
+| POST | `/api/refresh` | 手动请求检查；忙碌时不额外排队 |
+| POST | `/api/settings` | 保存下一次启动端口 |
+| POST | `/api/stop` | 退出服务并断开本程序连接 |
 
-```powershell
-.\.venv\Scripts\python.exe build.py `
-  --node "C:\Program Files\nodejs\node.exe" `
-  --cli-root "$env:APPDATA\npm\node_modules\@playwright\cli" `
-  --work-dir ".\build-work" `
-  --output-dir ".\dist"
-```
+POST 请求需要 `X-CourseBeacon-Token`。服务校验 Host；存在 Origin 时要求其匹配本地页面。页面不加载第三方脚本。
 
-### 打包过程
+## 数据存储
 
-1. 定位 Node 可执行文件及已安装的 Playwright CLI。
-2. 复制 Node、CLI 和其依赖，记录版本并准备许可证文件。
-3. 通过 PyInstaller 分析 `app.py` 及 Python 依赖。
-4. 将 `static/`、`scripts/` 和准备好的 `runtime/` 加入包中。
-5. 使用 `--onefile --windowed` 生成无控制台窗口的单文件程序。
+默认保存在 `%LOCALAPPDATA%\CourseBeacon`：
 
-程序通过 `sys._MEIPASS` 定位打包资源；源码运行时则使用源码目录。构建前请退出需要覆盖的旧 `.exe`，否则 Windows 可能阻止替换文件。
+| 文件 | 内容 |
+| --- | --- |
+| `coursebeacon.sqlite3` | 最近一次汇总快照 |
+| `config.json` | 保存的端口 |
+| `coursebeacon-v2.log` | 新版诊断日志 |
+| `coursebeacon-v2.log.1` 等 | 轮转日志，单文件约 1 MB，最多 3 份备份 |
+| `instance.lock` | 新版实例互斥锁文件 |
+| `running-port.txt` | 当前实例端口记录 |
+| `cli-sessions/` | CourseBeacon 专用 CLI 会话记录，避免其他 CLI 实例清理或争用 |
 
-## 测试与验证
+旧版独立 `chrome-profile` 目录不会被导入或删除。日常 Chrome 的登录状态继续保存在 Chrome 自己的资料目录中。
 
-### 自动化测试
+运行时的数据库、日志和 CLI 诊断文件可能包含个人课程信息，不应随源码或 exe 发布。
+
+## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s . -p test_app.py -v
 ```
 
-当前 4 项测试覆盖：
+12 项回归测试通过，覆盖手动刷新调度、重复点击抑制、登录失效停止、有限重试、验证阻塞、单实例锁、端口独占、仅断开浏览器连接、缓存更新、URL 校验及本地接口访问控制。
 
-- 超星 URL 白名单及不安全地址拒绝。
-- 单门课程失败时保留其缓存，成功课程按新结果更新。
-- 完整刷新后移除失效课程条目，并保存新的快照。
-- 本地接口令牌、来源、Host 校验及端口配置校验。
+2026-09-30 实测新版初次扫描：排除 14 门已结束课程，30 门课程中 29 门读取成功，找到 5 项未完成作业；一门受网站人脸采集要求阻塞。闲置超过 5 分钟未自动启动新一轮。测试中发现并修复了 Windows 端口复用、CLI 会话记录干扰和重连会话名冲突。最终 exe 的启动扫描及随后手动触发的完整扫描均得到 29/30 门成功、5 项未完成作业的结果；扫描期间重复请求返回 `queued: false`，未额外排队。
 
-这些测试不要求登录超星，不调用真实课程页面。
+真实页面联调需要 Chrome 授权连接，且超星账号具有课程访问权限。网页结构变化后应重新验证选择器及分页行为；本地回归测试不替代真实网站验证。
 
-### 开发阶段人工与浏览器验证
+## 已知限制与常见问题
 
-已验证过真实账号的课程扫描、作业直达链接、登录等待、端口设置、窄屏布局和程序退出；隔离浏览器场景也验证了课程排除、未完成筛选、多页遍历及时间原文提取。
+### 已开启远程调试但连接失败
 
-这类验证依赖当时的超星页面结构。更新选择器或浏览器工具版本后，应重新验证实际课程页面。最新持久化构建已核验打包代码包含 `--persistent` 参数。
+确认开关位于日常使用的 Chrome 中，并允许 Chrome 的连接请求。程序页面给出连接提示后，可手动重试。受限执行环境或本机安全策略可能阻止读取 `DevToolsActivePort`；需在正常桌面用户环境中运行。
 
-## 已知限制
+### 已登录 Chrome，为什么超星仍要求登录
 
-- 当前适配“我学的课”根课程列表和开发时验证过的新版作业页，不递归扫描课程文件夹。
-- 课程被人脸采集、登录验证或其他访问要求阻塞时，需要本人在超星官方页面或 APP 处理。
-- 超星调整 DOM、筛选方式或分页结构后，可能需要更新 `scripts/` 中的选择器。
-- 剩余时间按同步时读取到的原文展示，不保证与另一张刚刷新的网页逐秒一致。
-- 自动刷新检查已经发现的课程；新增或移出的课程通过手动刷新或重新启动重新发现。
-- 关闭 Chrome、在扫描标签页手动导航或同时启动共用资料目录的多个实例，可能干扰扫描。建议同一时间运行一个实例。
-- 本地服务面向单机使用，不提供公网部署或多用户账户管理。
+Chrome 用户身份和超星网站登录是两件事。程序复用当前可连接 Chrome 实例中的网站会话，不能延长超星服务端的登录有效期。多个 Chrome 用户资料并存时，请确认已授权的实例就是登录超星的实例。
 
-## 常见问题
+### 为什么没有自动更新剩余时间
 
-### 为什么需要再登录一次？
+v2 按要求仅在启动和手动点击时检查。页面显示的是最近一次检查时的原文，点击按钮才能重新读取。
 
-程序使用独立 Chrome 资料目录，不自动读取日常 Chrome 的登录状态。首次登录后会通过持久化目录复用；服务端使会话过期时仍需重新登录。
+### 为什么某课程读取失败
 
-### 为什么提示端口被占用？
+可能是人脸采集要求、登录失效、网络超时或网站结构变化。失败不等于没有作业；界面会报告未完成检查的情况。验证要求需本人在超星处理。
 
-可能已有 CourseBeacon 实例或其他程序使用该端口。退出旧实例，或通过 `--port` 指定其他端口。程序不会自动结束占用端口的其他进程。
+### 关闭网页后程序是否退出
 
-### 页面关闭后程序还在运行吗？
+不会。请使用“设置 → 退出 CourseBeacon”。该操作会保留个人 Chrome 和作业标签页。
 
-会。网页只是操作界面，后台服务仍可能运行。应通过“设置 → 退出 CourseBeacon”退出。
+### 兼容范围
 
-### 读取失败等于没有未完成作业吗？
-
-不等于。程序会分别显示失败课程及原因，并保留可用旧结果。只有成功完成扫描且结果为空时，才展示对应的无作业状态。
-
-### 为什么构建时找不到运行时？
-
-先确认 Node 和 `@playwright/cli` 已安装，再执行 `build.py --prepare`。源码运行还需要设置 `COURSEBEACON_NODE` 和 `COURSEBEACON_CLI`。路径不在默认位置时，使用构建参数显式指定。
-
-### 日志在哪里？
-
-默认位于 `%LOCALAPPDATA%\CourseBeacon\coursebeacon.log`。使用 `--data-dir` 后，日志随数据目录改变。反馈问题前应移除日志中的个人信息和带签名的课程链接。
+当前适配根课程列表及已验证的新版作业页，不递归扫描课程文件夹。网站更改 DOM 后可能需要更新提取脚本。建议只运行一个 CourseBeacon 实例，并避免手动操作程序的扫描标签。
 
 ## 许可证与资源说明
 
-项目尚未附带单独的开源许可证文件，因此此 README 不声明项目源码采用 MIT、Apache-2.0 或其他开源许可证。
+项目尚未附带独立开源许可证，不在此声明源码采用 MIT 或 Apache-2.0。
 
-- Playwright CLI 来源于 Microsoft 的 `microsoft/playwright-cli` 项目，其 Apache-2.0 许可证随工具运行时保留。
-- Node 及其所包含组件的许可证随构建运行时保存。
-- 作业行视觉规则及 `icons-act.png`、`endTime.png` 来自用户指定的超星作业页面，用于本地汇总界面的样式还原；资源权益属于原权利人。
+- Playwright CLI 来自 Microsoft 的 `microsoft/playwright-cli`，工具自身许可证随运行时保留。
+- Node 及其组件许可证随构建运行时保存。
+- 作业行视觉规则与图标来自用户指定的超星页面，权益属于原权利人，用于本地界面还原。

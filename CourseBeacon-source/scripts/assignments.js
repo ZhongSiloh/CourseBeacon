@@ -1,9 +1,16 @@
 async page => {
   const input = __INPUT__;
   const now = () => Date.now();
+  async function checkGate() {
+    if (page.url().includes('passport')) throw new Error('AUTH_REQUIRED: 超星登录已失效，请登录后点击检查作业');
+    const body = await page.locator('body').innerText({timeout:5000});
+    if (body.includes('人脸信息采集')) throw new Error('VERIFICATION_REQUIRED: 超星要求在手机 APP 完成人脸信息采集，此课程暂时无法读取');
+    if (body.includes('访问过于频繁') || body.includes('请完成验证')) throw new Error('VERIFICATION_REQUIRED: 超星要求访问验证，请在扫描页处理后手动重试');
+  }
   async function workFrame() {
     const deadline = now() + 25000;
     while (now() < deadline) {
+      await checkGate();
       for (const f of page.frames()) {
         if (await f.locator('.task-list #status').count().catch(()=>0)) return f;
       }
@@ -15,10 +22,13 @@ async page => {
     await page.goto(input.listUrl, {waitUntil:'domcontentloaded', timeout:30000});
   } else {
     await page.goto(input.course.url, {waitUntil:'domcontentloaded', timeout:30000});
-    const gate = await page.locator('body').innerText();
-    if (gate.includes('人脸信息采集')) throw new Error('超星要求在手机 APP 完成人脸信息采集，此课程暂时无法读取');
-    if (page.url().includes('passport2.chaoxing.com')) throw new Error('登录已失效，请点击刷新作业并在 Chrome 中重新登录');
-    await page.getByText('作业', {exact:true}).first().click({timeout:20000});
+    const deadline = now()+20000;
+    while (!(await page.getByText('作业', {exact:true}).first().isVisible().catch(()=>false))) {
+      await checkGate();
+      if(now()>deadline) throw Error('课程作业入口加载超时');
+      await page.waitForTimeout(250);
+    }
+    await page.getByText('作业', {exact:true}).first().click({timeout:8000});
   }
   let f = await workFrame();
   if (await f.locator('#status').inputValue() !== '1') {

@@ -2,7 +2,13 @@
 body{background:#fff;color:#181e33;font:12px/1.6 -apple-system,BlinkMacSystemFont,"Helvetica Neue","Segoe UI",Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
 header{padding-top:clamp(48px,8.5vh,96px);text-align:center}
 h1{font-family:Arial,sans-serif;font-size:clamp(40px,4.6vw,88px);font-weight:400;line-height:1.15;letter-spacing:-2px;color:#000}
-main{width:calc(100% - 64px);max-width:1280px;margin:clamp(130px,25vh,285px) auto 50px}
+main{width:calc(100% - 64px);max-width:1280px;margin:clamp(70px,14vh,160px) auto 50px}
+.primary-actions{margin:28px auto 0;text-align:center}
+.primary-actions #refresh{display:block;margin:0 auto;min-width:150px;padding:11px 28px;border-radius:24px;background:#3a8bff;color:white;font-size:14px;box-shadow:0 3px 10px #3a8bff20}
+.primary-actions #refresh:hover{background:#2779ef}
+.primary-actions p{margin-top:12px;color:#a8a8b3;font-size:12px}
+#browser-setup{margin:12px 30px 25px;padding:18px 22px;border:1px solid #dce8fa;border-radius:10px;color:#606d83;background:#f7faff;font-size:13px;overflow-wrap:anywhere}
+#browser-setup p+p{margin-top:8px}
 #notice{color:#9297a1;font-size:12px;min-height:20px;margin:0 30px 14px}
 #notice.ready{visibility:hidden}
 #notice.error,#notice.partial{color:#ad7131}

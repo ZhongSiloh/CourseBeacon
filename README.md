@@ -1,4 +1,4 @@
-# CourseBeacon
+<img width="2560" height="1380" alt="image" src="https://github.com/user-attachments/assets/253d6a99-85d5-4875-b007-b6f840ce569d" /># CourseBeacon
 
 > 使用 Python 与 Playwright CLI 汇总超星未完成作业的 Windows 本地工具。
 
@@ -201,11 +201,17 @@ playwright-cli -s=<本次唯一会话名> attach --cdp=chrome --raw
 
 Python 补充所属课程、条目 ID 和读取时间，校验链接属于超星域名。
 
-### 7. 更新缓存并展示
+### 7. 更新结果与保存快照
 
-成功课程按本次结果替换旧数据；失败课程保留已有条目并标记待核验。前端使用 DOM API 与 `textContent` 渲染标题、状态和时间，以真实 URL 创建链接。
+每门课程成功读取后，用新结果替换该课程的旧条目。如果确认该课程没有未完成作业，其旧条目会被移除。
 
-SQLite 保存最近一次 JSON 快照，不保存每轮完整历史。页面同时展示成功数量、错误和未核验数据状态。
+单门课程失败时，保留该课程的旧条目并标记 `stale`，同时记录错误；其他课程继续扫描。一轮结束后将汇总状态保存为 SQLite 中的 JSON 快照。
+
+### 8. 渲染页面和作业链接
+
+前端 `static/app.js` 轮询 `/api/state`，使用 DOM API 和 `textContent` 构建作业行。作业标题、状态及时间分别放入对应样式区域，链接以新标签页打开。
+
+样式采用原网页的标题字号、灰色状态、橙色剩余时间和作业图标，去除参考截图中用于标注的红框。课程名称放在悬停提示中。
 
 ### 8. 等待手动触发
 

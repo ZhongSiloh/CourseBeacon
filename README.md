@@ -1,4 +1,4 @@
-# CourseBeacon
+<img width="2560" height="1380" alt="image" src="https://github.com/user-attachments/assets/253d6a99-85d5-4875-b007-b6f840ce569d" /># CourseBeacon
 
 > 基于 Python 与 Playwright CLI 的超星未完成作业汇总工具。
 
@@ -282,7 +282,8 @@ Python 随后补充条目 ID、所属课程及缓存标记，并校验链接属�
 前端 `static/app.js` 轮询 `/api/state`，使用 DOM API 和 `textContent` 构建作业行。作业标题、状态及时间分别放入对应样式区域，链接以新标签页打开。
 
 样式采用原网页的标题字号、灰色状态、橙色剩余时间和作业图标，去除参考截图中用于标注的红框。课程名称放在悬停提示中。
-![Uploading image.png…]()
+<img width="2560" height="1380" alt="屏幕截图 2026-09-30 103627" src="https://github.com/user-attachments/assets/bec9fc2d-141b-406f-b928-08b9af9c75e3" />
+
 
 
 ### 9. 自动刷新与退出
